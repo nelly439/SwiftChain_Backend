@@ -1,7 +1,9 @@
 import type { CorsOptions, CorsOptionsDelegate } from 'cors';
 import type { HelmetOptions } from 'helmet';
 import type { Request } from 'express';
+import env from './env';
 import logger from './logger';
+import env from './env';
 
 /**
  * Error raised when a request originates from a disallowed origin.
@@ -24,8 +26,7 @@ export class CorsNotAllowedError extends Error {
  * Example: `CORS_ORIGIN=http://localhost:3000,https://app.swiftchain.io`
  */
 export const getAllowedOrigins = (): string[] =>
-  (process.env.CORS_ORIGIN ?? '')
-    .split(',')
+  env.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
 
@@ -52,9 +53,9 @@ export const isOriginAllowed = (origin: string | undefined, allowedOrigins: stri
 /**
  * CORS configuration delegate.
  *
- * The allow-list is resolved per request so that the policy reflects the
- * current environment configuration without requiring a server restart in
- * setups where the variable is reloaded.
+ * The allow-list is resolved per request so the delegate stays a pure function
+ * of the incoming request; the underlying `CORS_ORIGIN` value itself is the
+ * validated snapshot exported by `config/env`.
  */
 export const corsOptionsDelegate: CorsOptionsDelegate<Request> = (req, callback) => {
   const allowedOrigins = getAllowedOrigins();

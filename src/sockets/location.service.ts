@@ -1,8 +1,10 @@
 import { Types } from 'mongoose';
 import { Server as SocketIOServer } from 'socket.io';
+import env from '../config/env';
 import logger from '../config/logger';
 import { LocationUpdate } from '../models/LocationUpdate';
 import { redisClient } from '../config/redis';
+import { toUTC, nowUTC } from '../utils/dateUtils';
 import {
   DriverLocationUpdatePayload,
   LocationBroadcastPayload,
@@ -12,6 +14,7 @@ import {
   InterServerEvents,
   SocketData,
 } from './socket.types';
+import env from '../config/env';
 
 /**
  * Room name prefix for delivery-scoped broadcast rooms.
@@ -24,21 +27,21 @@ export const DELIVERY_ROOM_PREFIX = 'delivery:';
  * Updates with the same deduplication key within this window are rejected.
  * Default: 60 seconds (can be overridden via LOCATION_DEDUP_TTL_SECONDS env var).
  */
-const DEDUP_TTL_SECONDS = parseInt(process.env.LOCATION_DEDUP_TTL_SECONDS ?? '60', 10);
+const DEDUP_TTL_SECONDS = env.LOCATION_DEDUP_TTL_SECONDS;
 
 /**
  * Maximum age (in milliseconds) for a location update to be considered valid.
  * Updates older than this are rejected as stale.
  * Default: 5 minutes (can be overridden via LOCATION_MAX_AGE_MS env var).
  */
-const MAX_UPDATE_AGE_MS = parseInt(process.env.LOCATION_MAX_AGE_MS ?? '300000', 10);
+const MAX_UPDATE_AGE_MS = env.LOCATION_MAX_AGE_MS;
 
 /**
  * Maximum future timestamp tolerance (in milliseconds).
  * Updates with timestamps more than this far in the future are rejected.
  * Default: 30 seconds (can be overridden via LOCATION_MAX_FUTURE_MS env var).
  */
-const MAX_FUTURE_TOLERANCE_MS = parseInt(process.env.LOCATION_MAX_FUTURE_MS ?? '30000', 10);
+const MAX_FUTURE_TOLERANCE_MS = env.LOCATION_MAX_FUTURE_MS;
 
 /**
  * Build the canonical Socket.IO room name for a delivery.
@@ -98,7 +101,7 @@ export class LocationService {
     // Round coordinates to 6 decimal places (~0.1 meter precision) for deduplication
     const roundedLat = Math.round(lat * 1000000) / 1000000;
     const roundedLng = Math.round(lng * 1000000) / 1000000;
-    
+
     return `location:dedup:${driverId}:${deliveryId}:${capturedAt}:${roundedLat}:${roundedLng}`;
   }
 
@@ -123,14 +126,12 @@ export class LocationService {
     try {
       // Try to set the key with NX (only if not exists) and EX (expiry)
       const result = await redisClient.set(dedupKey, '1', 'EX', DEDUP_TTL_SECONDS, 'NX');
-      
+
       // If result is null, the key already exists (duplicate)
       return result === null;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      logger.warn(
-        `[Location] Redis deduplication check failed, allowing update: ${message}`,
-      );
+      logger.warn(`[Location] Redis deduplication check failed, allowing update: ${message}`);
       // On Redis errors, allow the update (fail open)
       return false;
     }
@@ -155,7 +156,11 @@ export class LocationService {
 
       if (lastTimestamp) {
         const lastTime = parseInt(lastTimestamp, 10);
-        if (capturedAt <= lastTime) {
+        // Strictly older updates are stale/out-of-order. Updates sharing the
+        // last processed timestamp are NOT stale — identical payloads are
+        // already rejected by the dedup key, and same-timestamp fixes with
+        // different coordinates are legitimate (e.g. burst GPS samples).
+        if (capturedAt < lastTime) {
           logger.debug(
             `[Location] Stale update detected — driverId=${driverId} ` +
               `deliveryId=${deliveryId} capturedAt=${capturedAt} lastTimestamp=${lastTime}`,
@@ -169,9 +174,7 @@ export class LocationService {
       return false;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      logger.warn(
-        `[Location] Redis stale check failed, allowing update: ${message}`,
-      );
+      logger.warn(`[Location] Redis stale check failed, allowing update: ${message}`);
       // On Redis errors, allow the update (fail open)
       return false;
     }
@@ -188,7 +191,9 @@ export class LocationService {
     const age = now - capturedAt;
 
     if (age > MAX_UPDATE_AGE_MS) {
-      return `Update is too old: ${Math.round(age / 1000)}s ago (max: ${Math.round(MAX_UPDATE_AGE_MS / 1000)}s)`;
+      return `Update is too old: ${Math.round(age / 1000)}s ago (max: ${Math.round(
+        MAX_UPDATE_AGE_MS / 1000,
+      )}s)`;
     }
 
     if (age < -MAX_FUTURE_TOLERANCE_MS) {
@@ -225,7 +230,7 @@ export class LocationService {
     }
 
     const capturedAt = payload.capturedAt ?? Date.now();
-    const receivedAt = new Date().toISOString();
+    const receivedAt = nowUTC().toISOString();
 
     // ── 2. Validate timestamp ────────────────────────────────────────────────
     const timestampError = this.validateTimestamp(capturedAt);
@@ -281,7 +286,7 @@ export class LocationService {
         driverId: new Types.ObjectId(driverId),
         deliveryId: new Types.ObjectId(payload.deliveryId),
         coordinates: { lat: payload.lat, lng: payload.lng },
-        capturedAt: new Date(capturedAt),
+        capturedAt: toUTC(capturedAt),
         isOfflineSync: false,
         status: 'pending',
       });

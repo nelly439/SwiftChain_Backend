@@ -1,12 +1,14 @@
 import cron, { ScheduledTask } from 'node-cron';
+import env from '../config/env';
 import logger from '../config/logger';
-import { scanForExpiredEscrows } from '../services/escrowService';
+import { escrowService } from '../services/escrow.service';
+import env from '../config/env';
 
 /**
  * Cron expression the escrow monitor runs on. Defaults to every 5 minutes.
  * Override with the `ESCROW_MONITOR_CRON` environment variable.
  */
-const ESCROW_MONITOR_CRON = process.env.ESCROW_MONITOR_CRON?.trim() || '*/5 * * * *';
+const ESCROW_MONITOR_CRON = env.ESCROW_MONITOR_CRON;
 
 let scheduledTask: ScheduledTask | null = null;
 let isRunning = false;
@@ -26,7 +28,7 @@ export const runEscrowExpiryScan = async (): Promise<void> => {
 
   isRunning = true;
   try {
-    const result = await scanForExpiredEscrows();
+    const result = await escrowService.scanForExpiredEscrows();
     if (result.flaggedCount > 0) {
       logger.info(
         `[EscrowMonitor] Scan complete — flagged ${result.flaggedCount} expired escrow(s).`,
